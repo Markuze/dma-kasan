@@ -1,0 +1,223 @@
+From 79b91fb725f27e97b1ed391d253035cd5d891382 Mon Sep 17 00:00:00 2001
+From: Markuze Alex <amarkuze@vmware.com>
+Date: Thu, 28 May 2020 14:58:16 +0000
+Subject: [PATCH 2/4] dma-kasan: alloc/free poisoning
+
+---
+ include/linux/dma-mapping.h |  3 +++
+ mm/kasan/common.c           | 40 +++++++++++++++++++++++++++++--------
+ mm/kasan/generic.c          |  3 +++
+ mm/kasan/kasan.h            |  4 +++-
+ 4 files changed, 41 insertions(+), 9 deletions(-)
+
+diff --git a/include/linux/dma-mapping.h b/include/linux/dma-mapping.h
+index f6ded992c..df68b2e7b 100644
+--- a/include/linux/dma-mapping.h
++++ b/include/linux/dma-mapping.h
+@@ -281,6 +281,9 @@ static inline dma_addr_t dma_map_page_attrs(struct device *dev,
+ 	dma_addr_t addr;
+ 
+ 	BUG_ON(!valid_dma_direction(dir));
++	//1. mark page as mapped (need to handle multiple mappings) - need to save per offset.
++	//2. check if page has other allocs other than offset - unmapped or mapped
++
+ 	if (dma_is_direct(ops))
+ 		addr = dma_direct_map_page(dev, page, offset, size, dir, attrs);
+ 	else
+diff --git a/mm/kasan/common.c b/mm/kasan/common.c
+index 09b534fbb..15828a1bd 100644
+--- a/mm/kasan/common.c
++++ b/mm/kasan/common.c
+@@ -156,6 +156,7 @@ void kasan_poison_shadow(const void *address, size_t size, u8 value)
+ 
+ void kasan_unpoison_shadow(const void *address, size_t size)
+ {
++#if 0
+ 	u8 tag = get_tag(address);
+ 
+ 	/*
+@@ -165,6 +166,7 @@ void kasan_unpoison_shadow(const void *address, size_t size)
+ 	 */
+ 	address = reset_tag(address);
+ 
++	kasan_poison_shadow(address, size, 0);
+ 	kasan_poison_shadow(address, size, tag);
+ 
+ 	if (size & KASAN_SHADOW_MASK) {
+@@ -175,8 +177,10 @@ void kasan_unpoison_shadow(const void *address, size_t size)
+ 		else
+ 			*shadow = size & KASAN_SHADOW_MASK;
+ 	}
++#endif
+ }
+ 
++//TODO: Consider posioning to identify mapped stack.
+ static void __kasan_unpoison_stack(struct task_struct *task, const void *sp)
+ {
+ 	void *base = task_stack_page(task);
+@@ -238,7 +242,7 @@ void kasan_free_pages(struct page *page, unsigned int order)
+ 	if (likely(!PageHighMem(page)))
+ 		kasan_poison_shadow(page_address(page),
+ 				PAGE_SIZE << order,
+-				KASAN_FREE_PAGE);
++				0);
+ }
+ 
+ /*
+@@ -329,9 +333,11 @@ void kasan_poison_slab(struct page *page)
+ 
+ 	for (i = 0; i < (1 << compound_order(page)); i++)
+ 		page_kasan_tag_reset(page + i);
++#if 0
+ 	kasan_poison_shadow(page_address(page),
+ 			PAGE_SIZE << compound_order(page),
+ 			KASAN_KMALLOC_REDZONE);
++#endif
+ }
+ 
+ void kasan_unpoison_object_data(struct kmem_cache *cache, void *object)
+@@ -341,9 +347,11 @@ void kasan_unpoison_object_data(struct kmem_cache *cache, void *object)
+ 
+ void kasan_poison_object_data(struct kmem_cache *cache, void *object)
+ {
++#if 0
+ 	kasan_poison_shadow(object,
+ 			round_up(cache->object_size, KASAN_SHADOW_SCALE_SIZE),
+ 			KASAN_KMALLOC_REDZONE);
++#endif
+ }
+ 
+ /*
+@@ -448,7 +456,7 @@ static bool __kasan_slab_free(struct kmem_cache *cache, void *object,
+ 	}
+ 
+ 	rounded_up_size = round_up(cache->object_size, KASAN_SHADOW_SCALE_SIZE);
+-	kasan_poison_shadow(object, rounded_up_size, KASAN_KMALLOC_FREE);
++	kasan_poison_shadow(object, rounded_up_size, 0);
+ 
+ 	if ((IS_ENABLED(CONFIG_KASAN_GENERIC) && !quarantine) ||
+ 			unlikely(!(cache->flags & SLAB_KASAN)))
+@@ -470,6 +478,7 @@ static void *__kasan_kmalloc(struct kmem_cache *cache, const void *object,
+ {
+ 	unsigned long redzone_start;
+ 	unsigned long redzone_end;
++	struct page *page = virt_to_page(object);
+ 	u8 tag;
+ 
+ 	if (gfpflags_allow_blocking(flags))
+@@ -478,6 +487,10 @@ static void *__kasan_kmalloc(struct kmem_cache *cache, const void *object,
+ 	if (unlikely(object == NULL))
+ 		return NULL;
+ 
++	if (cache->flags & SLAB_KASAN)
++		set_track(&get_alloc_info(cache, object)->alloc_track, flags);
++
++#if 0
+ 	redzone_start = round_up((unsigned long)(object + size),
+ 				KASAN_SHADOW_SCALE_SIZE);
+ 	redzone_end = round_up((unsigned long)object + cache->object_size,
+@@ -491,10 +504,20 @@ static void *__kasan_kmalloc(struct kmem_cache *cache, const void *object,
+ 	kasan_poison_shadow((void *)redzone_start, redzone_end - redzone_start,
+ 		KASAN_KMALLOC_REDZONE);
+ 
+-	if (cache->flags & SLAB_KASAN)
+-		set_track(&get_alloc_info(cache, object)->alloc_track, flags);
+-
+ 	return set_tag(object, tag);
++#else
++
++	//TODO: Check mapping flags and report.
++	//	kasan_report(addr, size, write, ret_ip); - check if page has dma write access
++	kasan_poison_shadow(object, size, DMA_KASAN_ALLOC);
++/*
++TODO: Need to propagate ret_ip
++	if ((size >> KASAN_SHADOW_SCALE_SHIFT) >= sizeof(unsigned long)) {
++
++	}
++*/
++	return object;
++#endif
+ }
+ 
+ void * __must_check kasan_slab_alloc(struct kmem_cache *cache, void *object,
+@@ -510,9 +533,11 @@ void * __must_check kasan_kmalloc(struct kmem_cache *cache, const void *object,
+ }
+ EXPORT_SYMBOL(kasan_kmalloc);
+ 
++//TODO: Consider handling large allocs? Ignore for now
+ void * __must_check kasan_kmalloc_large(const void *ptr, size_t size,
+ 						gfp_t flags)
+ {
++#if 0
+ 	struct page *page;
+ 	unsigned long redzone_start;
+ 	unsigned long redzone_end;
+@@ -531,7 +556,7 @@ void * __must_check kasan_kmalloc_large(const void *ptr, size_t size,
+ 	kasan_unpoison_shadow(ptr, size);
+ 	kasan_poison_shadow((void *)redzone_start, redzone_end - redzone_start,
+ 		KASAN_PAGE_REDZONE);
+-
++#endif
+ 	return (void *)ptr;
+ }
+ 
+@@ -562,8 +587,7 @@ void kasan_poison_kfree(void *ptr, unsigned long ip)
+ 			kasan_report_invalid_free(ptr, ip);
+ 			return;
+ 		}
+-		kasan_poison_shadow(ptr, PAGE_SIZE << compound_order(page),
+-				KASAN_FREE_PAGE);
++		kasan_poison_shadow(ptr, PAGE_SIZE << compound_order(page), 0);
+ 	} else {
+ 		__kasan_slab_free(page->slab_cache, ptr, ip, false);
+ 	}
+diff --git a/mm/kasan/generic.c b/mm/kasan/generic.c
+index ccb620727..21f0717e5 100644
+--- a/mm/kasan/generic.c
++++ b/mm/kasan/generic.c
+@@ -166,10 +166,12 @@ static __always_inline bool memory_is_poisoned(unsigned long addr, size_t size)
+ 	return memory_is_poisoned_n(addr, size);
+ }
+ 
++//change this
+ static __always_inline void check_memory_region_inline(unsigned long addr,
+ 						size_t size, bool write,
+ 						unsigned long ret_ip)
+ {
++/*
+ 	if (unlikely(size == 0))
+ 		return;
+ 
+@@ -183,6 +185,7 @@ static __always_inline void check_memory_region_inline(unsigned long addr,
+ 		return;
+ 
+ 	kasan_report(addr, size, write, ret_ip);
++*/
+ }
+ 
+ void check_memory_region(unsigned long addr, size_t size, bool write,
+diff --git a/mm/kasan/kasan.h b/mm/kasan/kasan.h
+index ea51b2d89..900c9b9a1 100644
+--- a/mm/kasan/kasan.h
++++ b/mm/kasan/kasan.h
+@@ -12,6 +12,8 @@
+ #define KASAN_TAG_INVALID	0xFE /* inaccessible memory tag */
+ #define KASAN_TAG_MAX		0xFD /* maximum value for random tags */
+ 
++#define DMA_KASAN_ALLOC		0x3F;/* We leave two bits for dma-map values */
++
+ #ifdef CONFIG_KASAN_GENERIC
+ #define KASAN_FREE_PAGE         0xFF  /* page was freed */
+ #define KASAN_PAGE_REDZONE      0xFE  /* redzone for kmalloc_large allocations */
+@@ -151,7 +153,7 @@ static inline void quarantine_remove_cache(struct kmem_cache *cache) { }
+ void print_tags(u8 addr_tag, const void *addr);
+ 
+ u8 random_tag(void);
+-
++#error "Just making sure...\n"
+ #else
+ 
+ static inline void print_tags(u8 addr_tag, const void *addr) { }
+-- 
+2.20.1
+

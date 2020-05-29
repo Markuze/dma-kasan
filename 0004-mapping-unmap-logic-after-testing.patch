@@ -1,0 +1,79 @@
+From 1111fd7b5c69a4894caf01c69392b08941346d10 Mon Sep 17 00:00:00 2001
+From: Markuze Alex <amarkuze@vmware.com>
+Date: Fri, 29 May 2020 13:08:02 +0000
+Subject: [PATCH 4/4] mapping: unmap logic after testing
+
+---
+ include/linux/dma-mapping.h |  7 +++++++
+ include/linux/kasan.h       |  2 ++
+ mm/kasan/generic.c          | 16 ++++++++++++++++
+ 3 files changed, 25 insertions(+)
+
+diff --git a/include/linux/dma-mapping.h b/include/linux/dma-mapping.h
+index df68b2e7b..e716f7e3f 100644
+--- a/include/linux/dma-mapping.h
++++ b/include/linux/dma-mapping.h
+@@ -11,6 +11,7 @@
+ #include <linux/scatterlist.h>
+ #include <linux/bug.h>
+ #include <linux/mem_encrypt.h>
++#include <linux/kasan.h>
+ 
+ /**
+  * List of possible attributes associated with a DMA mapping. The semantics
+@@ -283,6 +284,12 @@ static inline dma_addr_t dma_map_page_attrs(struct device *dev,
+ 	BUG_ON(!valid_dma_direction(dir));
+ 	//1. mark page as mapped (need to handle multiple mappings) - need to save per offset.
+ 	//2. check if page has other allocs other than offset - unmapped or mapped
++	if (dir == DMA_BIDIRECTIONAL || dir == DMA_TO_DEVICE)
++		set_bit(PG_DMA_R, &page->flags);
++	if (dir == DMA_BIDIRECTIONAL || dir == DMA_FROM_DEVICE)
++		set_bit(PG_DMA_W, &page->flags);
++
++	check_page_memory(page_address(page) + offset, size, _RET_IP_, test_bit(PG_DMA_W, &page->flags));
+ 
+ 	if (dma_is_direct(ops))
+ 		addr = dma_direct_map_page(dev, page, offset, size, dir, attrs);
+diff --git a/include/linux/kasan.h b/include/linux/kasan.h
+index 91012007e..4f9899fec 100644
+--- a/include/linux/kasan.h
++++ b/include/linux/kasan.h
+@@ -83,6 +83,8 @@ size_t kasan_metadata_size(struct kmem_cache *cache);
+ bool kasan_save_enable_multi_shot(void);
+ void kasan_restore_multi_shot(bool enabled);
+ 
++void check_page_memory(void *ptr, size_t size, unsigned long ret_ip, bool write);
++
+ #else /* CONFIG_KASAN */
+ 
+ static inline void kasan_unpoison_shadow(const void *address, size_t size) {}
+diff --git a/mm/kasan/generic.c b/mm/kasan/generic.c
+index 21f0717e5..a4f72b24c 100644
+--- a/mm/kasan/generic.c
++++ b/mm/kasan/generic.c
+@@ -166,6 +166,22 @@ static __always_inline bool memory_is_poisoned(unsigned long addr, size_t size)
+ 	return memory_is_poisoned_n(addr, size);
+ }
+ 
++void check_page_memory(void *ptr, size_t size, unsigned long ret_ip, bool write)
++{
++	void *page_start = page_address(virt_to_page(ptr));
++	void *map_end = ptr + size;
++	unsigned long ret;
++
++	ret = memory_is_nonzero(kasan_mem_to_shadow(page_start),
++			kasan_mem_to_shadow(ptr -1) + 1);
++	ret = ret | memory_is_nonzero(kasan_mem_to_shadow(map_end),
++			kasan_mem_to_shadow(page_start + PAGE_SIZE));
++	if (ret) {
++		kasan_report((unsigned long)ptr, size, write, ret_ip);
++	}
++}
++EXPORT_SYMBOL(check_page_memory);
++
+ //change this
+ static __always_inline void check_memory_region_inline(unsigned long addr,
+ 						size_t size, bool write,
+-- 
+2.20.1
+

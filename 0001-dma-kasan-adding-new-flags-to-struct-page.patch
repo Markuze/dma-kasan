@@ -1,0 +1,55 @@
+From 68a7f98efa5c8c278d27adb027059fe5cda5f0e1 Mon Sep 17 00:00:00 2001
+From: Markuze Alex <amarkuze@vmware.com>
+Date: Wed, 27 May 2020 11:41:24 +0000
+Subject: [PATCH 1/4] dma-kasan: adding new flags to struct page
+
+---
+ Makefile                       | 2 +-
+ include/linux/page-flags.h     | 2 ++
+ include/trace/events/mmflags.h | 4 +++-
+ 3 files changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index d5713e7b1..52c2eda05 100644
+--- a/Makefile
++++ b/Makefile
+@@ -2,7 +2,7 @@
+ VERSION = 5
+ PATCHLEVEL = 0
+ SUBLEVEL = 0
+-EXTRAVERSION =
++EXTRAVERSION = '-DMA-KASAN'
+ NAME = Shy Crocodile
+ 
+ # *DOCUMENTATION*
+diff --git a/include/linux/page-flags.h b/include/linux/page-flags.h
+index 39b4494e2..8e3a058fc 100644
+--- a/include/linux/page-flags.h
++++ b/include/linux/page-flags.h
+@@ -102,6 +102,8 @@ enum pageflags {
+ 	PG_young,
+ 	PG_idle,
+ #endif
++	PG_DMA_R,
++	PG_DMA_W,
+ 	__NR_PAGEFLAGS,
+ 
+ 	/* Filesystems */
+diff --git a/include/trace/events/mmflags.h b/include/trace/events/mmflags.h
+index a1675d437..5cd7ec068 100644
+--- a/include/trace/events/mmflags.h
++++ b/include/trace/events/mmflags.h
+@@ -100,7 +100,9 @@
+ 	{1UL << PG_mappedtodisk,	"mappedtodisk"	},		\
+ 	{1UL << PG_reclaim,		"reclaim"	},		\
+ 	{1UL << PG_swapbacked,		"swapbacked"	},		\
+-	{1UL << PG_unevictable,		"unevictable"	}		\
++	{1UL << PG_unevictable,		"unevictable"	},		\
++	{1UL << PG_DMA_R,		"dma_read"	},		\
++	{1UL << PG_DMA_W,		"dma_write"	}		\
+ IF_HAVE_PG_MLOCK(PG_mlocked,		"mlocked"	)		\
+ IF_HAVE_PG_UNCACHED(PG_uncached,	"uncached"	)		\
+ IF_HAVE_PG_HWPOISON(PG_hwpoison,	"hwpoison"	)		\
+-- 
+2.20.1
+
