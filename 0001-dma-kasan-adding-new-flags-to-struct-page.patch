@@ -1,13 +1,27 @@
-From 68a7f98efa5c8c278d27adb027059fe5cda5f0e1 Mon Sep 17 00:00:00 2001
+From 31088ddb522f8c52ada3a1a3fd63a8d8a1aae91e Mon Sep 17 00:00:00 2001
 From: Markuze Alex <amarkuze@vmware.com>
 Date: Wed, 27 May 2020 11:41:24 +0000
-Subject: [PATCH 1/4] dma-kasan: adding new flags to struct page
+Subject: [PATCH] dma-kasan: adding new flags to struct page
 
+dma-kasan: alloc/free poisoning
 ---
- Makefile                       | 2 +-
- include/linux/page-flags.h     | 2 ++
- include/trace/events/mmflags.h | 4 +++-
- 3 files changed, 6 insertions(+), 2 deletions(-)
+ Makefile                       |  2 +-
+ include/linux/dma-mapping.h    | 16 ++++++++
+ include/linux/kasan.h          | 12 +++---
+ include/linux/page-flags.h     |  2 +
+ include/linux/slab.h           |  1 +
+ include/trace/events/mmflags.h |  4 +-
+ lib/Makefile                   |  1 +
+ lib/test-dma-kasan.c           | 71 ++++++++++++++++++++++++++++++++++
+ mm/kasan/common.c              | 71 +++++++++++++++++++++++-----------
+ mm/kasan/generic.c             | 19 +++++++++
+ mm/kasan/kasan.h               |  9 ++++-
+ mm/slab.c                      |  8 ++--
+ mm/slab.h                      |  4 +-
+ mm/slab_common.c               |  2 +-
+ mm/slub.c                      | 16 ++++----
+ 15 files changed, 193 insertions(+), 45 deletions(-)
+ create mode 100644 lib/test-dma-kasan.c
 
 diff --git a/Makefile b/Makefile
 index d5713e7b1..52c2eda05 100644
@@ -22,6 +36,92 @@ index d5713e7b1..52c2eda05 100644
  NAME = Shy Crocodile
  
  # *DOCUMENTATION*
+diff --git a/include/linux/dma-mapping.h b/include/linux/dma-mapping.h
+index f6ded992c..1aa1467ae 100644
+--- a/include/linux/dma-mapping.h
++++ b/include/linux/dma-mapping.h
+@@ -11,6 +11,7 @@
+ #include <linux/scatterlist.h>
+ #include <linux/bug.h>
+ #include <linux/mem_encrypt.h>
++#include <linux/kasan.h>
+ 
+ /**
+  * List of possible attributes associated with a DMA mapping. The semantics
+@@ -273,6 +274,16 @@ static inline void set_dma_ops(struct device *dev,
+ 	dev->dma_ops = dma_ops;
+ }
+ 
++static inline void mark_dma_mapped(struct page *page, enum dma_data_direction dir)
++{
++	//1. mark page as mapped (need to handle multiple mappings) - need to save per offset.
++	//2. check if page has other allocs other than offset - unmapped or mapped
++	if (dir == DMA_BIDIRECTIONAL || dir == DMA_TO_DEVICE)
++		set_bit(PG_DMA_R, &page->flags);
++	if (dir == DMA_BIDIRECTIONAL || dir == DMA_FROM_DEVICE)
++		set_bit(PG_DMA_W, &page->flags);
++}
++
+ static inline dma_addr_t dma_map_page_attrs(struct device *dev,
+ 		struct page *page, size_t offset, size_t size,
+ 		enum dma_data_direction dir, unsigned long attrs)
+@@ -281,6 +292,11 @@ static inline dma_addr_t dma_map_page_attrs(struct device *dev,
+ 	dma_addr_t addr;
+ 
+ 	BUG_ON(!valid_dma_direction(dir));
++
++	mark_dma_mapped(page, dir);
++
++	check_page_memory(page_address(page) + offset, size, _RET_IP_, test_bit(PG_DMA_W, &page->flags));
++
+ 	if (dma_is_direct(ops))
+ 		addr = dma_direct_map_page(dev, page, offset, size, dir, attrs);
+ 	else
+diff --git a/include/linux/kasan.h b/include/linux/kasan.h
+index b40ea104d..4f9899fec 100644
+--- a/include/linux/kasan.h
++++ b/include/linux/kasan.h
+@@ -57,12 +57,12 @@ void * __must_check kasan_kmalloc_large(const void *ptr, size_t size,
+ void kasan_kfree_large(void *ptr, unsigned long ip);
+ void kasan_poison_kfree(void *ptr, unsigned long ip);
+ void * __must_check kasan_kmalloc(struct kmem_cache *s, const void *object,
+-					size_t size, gfp_t flags);
++					size_t size, gfp_t flags, unsigned long);
+ void * __must_check kasan_krealloc(const void *object, size_t new_size,
+-					gfp_t flags);
++					gfp_t flags, unsigned long);
+ 
+ void * __must_check kasan_slab_alloc(struct kmem_cache *s, void *object,
+-					gfp_t flags);
++					gfp_t flags, unsigned long);
+ bool kasan_slab_free(struct kmem_cache *s, void *object, unsigned long ip);
+ 
+ struct kasan_cache {
+@@ -83,6 +83,8 @@ size_t kasan_metadata_size(struct kmem_cache *cache);
+ bool kasan_save_enable_multi_shot(void);
+ void kasan_restore_multi_shot(bool enabled);
+ 
++void check_page_memory(void *ptr, size_t size, unsigned long ret_ip, bool write);
++
+ #else /* CONFIG_KASAN */
+ 
+ static inline void kasan_unpoison_shadow(const void *address, size_t size) {}
+@@ -123,13 +125,13 @@ static inline void *kasan_kmalloc(struct kmem_cache *s, const void *object,
+ 	return (void *)object;
+ }
+ static inline void *kasan_krealloc(const void *object, size_t new_size,
+-				 gfp_t flags)
++				 gfp_t flags, unsigned long)
+ {
+ 	return (void *)object;
+ }
+ 
+ static inline void *kasan_slab_alloc(struct kmem_cache *s, void *object,
+-				   gfp_t flags)
++				   gfp_t flags, unsigned long ip)
+ {
+ 	return object;
+ }
 diff --git a/include/linux/page-flags.h b/include/linux/page-flags.h
 index 39b4494e2..8e3a058fc 100644
 --- a/include/linux/page-flags.h
@@ -35,6 +135,18 @@ index 39b4494e2..8e3a058fc 100644
  	__NR_PAGEFLAGS,
  
  	/* Filesystems */
+diff --git a/include/linux/slab.h b/include/linux/slab.h
+index 11b45f7ae..49867ba59 100644
+--- a/include/linux/slab.h
++++ b/include/linux/slab.h
+@@ -178,6 +178,7 @@ void memcg_destroy_kmem_caches(struct mem_cgroup *);
+ /*
+  * Common kmalloc functions provided by all allocators
+  */
++
+ void * __must_check __krealloc(const void *, size_t, gfp_t);
+ void * __must_check krealloc(const void *, size_t, gfp_t);
+ void kfree(const void *);
 diff --git a/include/trace/events/mmflags.h b/include/trace/events/mmflags.h
 index a1675d437..5cd7ec068 100644
 --- a/include/trace/events/mmflags.h
@@ -50,6 +162,502 @@ index a1675d437..5cd7ec068 100644
  IF_HAVE_PG_MLOCK(PG_mlocked,		"mlocked"	)		\
  IF_HAVE_PG_UNCACHED(PG_uncached,	"uncached"	)		\
  IF_HAVE_PG_HWPOISON(PG_hwpoison,	"hwpoison"	)		\
+diff --git a/lib/Makefile b/lib/Makefile
+index e1b59da71..b12d0a882 100644
+--- a/lib/Makefile
++++ b/lib/Makefile
+@@ -51,6 +51,7 @@ obj-$(CONFIG_TEST_FIRMWARE) += test_firmware.o
+ obj-$(CONFIG_TEST_SYSCTL) += test_sysctl.o
+ obj-$(CONFIG_TEST_HASH) += test_hash.o test_siphash.o
+ obj-$(CONFIG_TEST_IDA) += test_ida.o
++obj-$(CONFIG_TEST_KASAN) += test-dma-kasan.o
+ obj-$(CONFIG_TEST_KASAN) += test_kasan.o
+ CFLAGS_test_kasan.o += -fno-builtin
+ CFLAGS_test_kasan.o += $(call cc-disable-warning, vla)
+diff --git a/lib/test-dma-kasan.c b/lib/test-dma-kasan.c
+new file mode 100644
+index 000000000..e8c093a38
+--- /dev/null
++++ b/lib/test-dma-kasan.c
+@@ -0,0 +1,71 @@
++/*
++ *
++ * Copyright (c) 2014 Samsung Electronics Co., Ltd.
++ * Author: Andrey Ryabinin <a.ryabinin@samsung.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ */
++
++#define pr_fmt(fmt) "dma kasan test: %s " fmt, __func__
++
++#include <linux/delay.h>
++#include <linux/kernel.h>
++#include <linux/mman.h>
++#include <linux/mm.h>
++#include <linux/printk.h>
++#include <linux/slab.h>
++#include <linux/string.h>
++#include <linux/uaccess.h>
++#include <linux/module.h>
++#include <linux/kasan.h>
++
++#include <linux/dma-mapping.h>
++
++/*
++ * Note: test functions are marked noinline so that their names appear in
++ * reports.
++ */
++
++#define SHADOW_PAGE_SIZE (PAGE_SIZE >> KASAN_SHADOW_SCALE_SHIFT)
++
++static void noinline hello_dma_kasan(void)
++{
++	size_t size = 64;
++	struct page* page;
++	void *buff = kmalloc(size, GFP_KERNEL);
++	const void *shadow;
++
++	page = virt_to_page(buff);
++	shadow = kasan_mem_to_shadow(page_address(page));
++
++	mark_dma_mapped(page, DMA_FROM_DEVICE);
++	pr_info("Dump on alloc\n");
++	print_hex_dump(KERN_INFO, "\t:", DUMP_PREFIX_ADDRESS, 16, 1, shadow, SHADOW_PAGE_SIZE, false);
++
++	check_page_memory(buff, size, _RET_IP_, test_bit(PG_DMA_W, &page->flags));
++
++	kfree(buff);
++	pr_info("Dump on free\n");
++	print_hex_dump(KERN_INFO, "\t:", DUMP_PREFIX_OFFSET, 16, 1, shadow, SHADOW_PAGE_SIZE, false);
++}
++
++static int __init dma_tests_init(void)
++{
++	/*
++	 * Temporarily enable multi-shot mode. Otherwise, we'd only get a
++	 * report for the first case.
++	 */
++	bool multishot = kasan_save_enable_multi_shot();
++
++	hello_dma_kasan();
++
++	kasan_restore_multi_shot(multishot);
++
++	return -EAGAIN;
++}
++
++module_init(dma_tests_init);
++MODULE_LICENSE("GPL");
+diff --git a/mm/kasan/common.c b/mm/kasan/common.c
+index 09b534fbb..5239c7cad 100644
+--- a/mm/kasan/common.c
++++ b/mm/kasan/common.c
+@@ -156,6 +156,7 @@ void kasan_poison_shadow(const void *address, size_t size, u8 value)
+ 
+ void kasan_unpoison_shadow(const void *address, size_t size)
+ {
++#if 0
+ 	u8 tag = get_tag(address);
+ 
+ 	/*
+@@ -165,6 +166,7 @@ void kasan_unpoison_shadow(const void *address, size_t size)
+ 	 */
+ 	address = reset_tag(address);
+ 
++	kasan_poison_shadow(address, size, 0);
+ 	kasan_poison_shadow(address, size, tag);
+ 
+ 	if (size & KASAN_SHADOW_MASK) {
+@@ -175,8 +177,10 @@ void kasan_unpoison_shadow(const void *address, size_t size)
+ 		else
+ 			*shadow = size & KASAN_SHADOW_MASK;
+ 	}
++#endif
+ }
+ 
++//TODO: Consider posioning to identify mapped stack.
+ static void __kasan_unpoison_stack(struct task_struct *task, const void *sp)
+ {
+ 	void *base = task_stack_page(task);
+@@ -238,7 +242,7 @@ void kasan_free_pages(struct page *page, unsigned int order)
+ 	if (likely(!PageHighMem(page)))
+ 		kasan_poison_shadow(page_address(page),
+ 				PAGE_SIZE << order,
+-				KASAN_FREE_PAGE);
++				0);
+ }
+ 
+ /*
+@@ -329,9 +333,11 @@ void kasan_poison_slab(struct page *page)
+ 
+ 	for (i = 0; i < (1 << compound_order(page)); i++)
+ 		page_kasan_tag_reset(page + i);
++#if 0
+ 	kasan_poison_shadow(page_address(page),
+ 			PAGE_SIZE << compound_order(page),
+ 			KASAN_KMALLOC_REDZONE);
++#endif
+ }
+ 
+ void kasan_unpoison_object_data(struct kmem_cache *cache, void *object)
+@@ -341,9 +347,11 @@ void kasan_unpoison_object_data(struct kmem_cache *cache, void *object)
+ 
+ void kasan_poison_object_data(struct kmem_cache *cache, void *object)
+ {
++#if 0
+ 	kasan_poison_shadow(object,
+ 			round_up(cache->object_size, KASAN_SHADOW_SCALE_SIZE),
+ 			KASAN_KMALLOC_REDZONE);
++#endif
+ }
+ 
+ /*
+@@ -440,15 +448,15 @@ static bool __kasan_slab_free(struct kmem_cache *cache, void *object,
+ 	/* RCU slabs could be legally used after free within the RCU period */
+ 	if (unlikely(cache->flags & SLAB_TYPESAFE_BY_RCU))
+ 		return false;
+-
+-	shadow_byte = READ_ONCE(*(s8 *)kasan_mem_to_shadow(object));
+-	if (shadow_invalid(tag, shadow_byte)) {
+-		kasan_report_invalid_free(tagged_object, ip);
+-		return true;
+-	}
+-
++/*
++*	shadow_byte = READ_ONCE(*(s8 *)kasan_mem_to_shadow(object));
++*	if (shadow_invalid(tag, shadow_byte)) {
++*		kasan_report_invalid_free(tagged_object, ip);
++*		return true;
++*	}
++*/
+ 	rounded_up_size = round_up(cache->object_size, KASAN_SHADOW_SCALE_SIZE);
+-	kasan_poison_shadow(object, rounded_up_size, KASAN_KMALLOC_FREE);
++	kasan_poison_shadow(object, rounded_up_size, 0);
+ 
+ 	if ((IS_ENABLED(CONFIG_KASAN_GENERIC) && !quarantine) ||
+ 			unlikely(!(cache->flags & SLAB_KASAN)))
+@@ -466,10 +474,13 @@ bool kasan_slab_free(struct kmem_cache *cache, void *object, unsigned long ip)
+ }
+ 
+ static void *__kasan_kmalloc(struct kmem_cache *cache, const void *object,
+-				size_t size, gfp_t flags, bool keep_tag)
++				size_t size, gfp_t flags, bool keep_tag,
++				unsigned long ret_ip)
+ {
+ 	unsigned long redzone_start;
+ 	unsigned long redzone_end;
++	struct page *page = virt_to_page(object);
++	bool write;
+ 	u8 tag;
+ 
+ 	if (gfpflags_allow_blocking(flags))
+@@ -478,6 +489,10 @@ static void *__kasan_kmalloc(struct kmem_cache *cache, const void *object,
+ 	if (unlikely(object == NULL))
+ 		return NULL;
+ 
++	if (cache->flags & SLAB_KASAN)
++		set_track(&get_alloc_info(cache, object)->alloc_track, flags);
++
++#if 0
+ 	redzone_start = round_up((unsigned long)(object + size),
+ 				KASAN_SHADOW_SCALE_SIZE);
+ 	redzone_end = round_up((unsigned long)object + cache->object_size,
+@@ -491,28 +506,41 @@ static void *__kasan_kmalloc(struct kmem_cache *cache, const void *object,
+ 	kasan_poison_shadow((void *)redzone_start, redzone_end - redzone_start,
+ 		KASAN_KMALLOC_REDZONE);
+ 
+-	if (cache->flags & SLAB_KASAN)
+-		set_track(&get_alloc_info(cache, object)->alloc_track, flags);
+-
+ 	return set_tag(object, tag);
++#else
++
++	//TODO: Check mapping flags and report.
++/*	write = test_bit(PG_DMA_W, &page->flags);
++*	if (test_bit(PG_DMA_R, &page->flags) || write)
++*		kasan_report(addr, size, write, ret_ip); - check if page has dma write access
++*/
++	kasan_poison_shadow(object, size, DMA_KASAN_ALLOC);
++	if ((size >> KASAN_SHADOW_SCALE_SHIFT) >= sizeof(uint64_t)) {//64Byte allocs, can accomodate 32Bytes
++		uint64_t *shadow = kasan_mem_to_shadow(object);
++		*shadow = ret_ip & DMA_KASAN_MAPP_MASK64;
++	}
++	return object;
++#endif
+ }
+ 
+ void * __must_check kasan_slab_alloc(struct kmem_cache *cache, void *object,
+-					gfp_t flags)
++					gfp_t flags, unsigned long ret_ip)
+ {
+-	return __kasan_kmalloc(cache, object, cache->object_size, flags, false);
++	return __kasan_kmalloc(cache, object, cache->object_size, flags, false, ret_ip);
+ }
+ 
+ void * __must_check kasan_kmalloc(struct kmem_cache *cache, const void *object,
+-				size_t size, gfp_t flags)
++				size_t size, gfp_t flags, unsigned long ret_ip)
+ {
+-	return __kasan_kmalloc(cache, object, size, flags, true);
++	return __kasan_kmalloc(cache, object, size, flags, true, ret_ip);
+ }
+ EXPORT_SYMBOL(kasan_kmalloc);
+ 
++//TODO: Consider handling large allocs? Ignore for now
+ void * __must_check kasan_kmalloc_large(const void *ptr, size_t size,
+ 						gfp_t flags)
+ {
++#if 0
+ 	struct page *page;
+ 	unsigned long redzone_start;
+ 	unsigned long redzone_end;
+@@ -531,11 +559,11 @@ void * __must_check kasan_kmalloc_large(const void *ptr, size_t size,
+ 	kasan_unpoison_shadow(ptr, size);
+ 	kasan_poison_shadow((void *)redzone_start, redzone_end - redzone_start,
+ 		KASAN_PAGE_REDZONE);
+-
++#endif
+ 	return (void *)ptr;
+ }
+ 
+-void * __must_check kasan_krealloc(const void *object, size_t size, gfp_t flags)
++void * __must_check kasan_krealloc(const void *object, size_t size, gfp_t flags, unsigned long ret_ip)
+ {
+ 	struct page *page;
+ 
+@@ -548,7 +576,7 @@ void * __must_check kasan_krealloc(const void *object, size_t size, gfp_t flags)
+ 		return kasan_kmalloc_large(object, size, flags);
+ 	else
+ 		return __kasan_kmalloc(page->slab_cache, object, size,
+-						flags, true);
++						flags, true, ret_ip);
+ }
+ 
+ void kasan_poison_kfree(void *ptr, unsigned long ip)
+@@ -562,8 +590,7 @@ void kasan_poison_kfree(void *ptr, unsigned long ip)
+ 			kasan_report_invalid_free(ptr, ip);
+ 			return;
+ 		}
+-		kasan_poison_shadow(ptr, PAGE_SIZE << compound_order(page),
+-				KASAN_FREE_PAGE);
++		kasan_poison_shadow(ptr, PAGE_SIZE << compound_order(page), 0);
+ 	} else {
+ 		__kasan_slab_free(page->slab_cache, ptr, ip, false);
+ 	}
+diff --git a/mm/kasan/generic.c b/mm/kasan/generic.c
+index ccb620727..a4f72b24c 100644
+--- a/mm/kasan/generic.c
++++ b/mm/kasan/generic.c
+@@ -166,10 +166,28 @@ static __always_inline bool memory_is_poisoned(unsigned long addr, size_t size)
+ 	return memory_is_poisoned_n(addr, size);
+ }
+ 
++void check_page_memory(void *ptr, size_t size, unsigned long ret_ip, bool write)
++{
++	void *page_start = page_address(virt_to_page(ptr));
++	void *map_end = ptr + size;
++	unsigned long ret;
++
++	ret = memory_is_nonzero(kasan_mem_to_shadow(page_start),
++			kasan_mem_to_shadow(ptr -1) + 1);
++	ret = ret | memory_is_nonzero(kasan_mem_to_shadow(map_end),
++			kasan_mem_to_shadow(page_start + PAGE_SIZE));
++	if (ret) {
++		kasan_report((unsigned long)ptr, size, write, ret_ip);
++	}
++}
++EXPORT_SYMBOL(check_page_memory);
++
++//change this
+ static __always_inline void check_memory_region_inline(unsigned long addr,
+ 						size_t size, bool write,
+ 						unsigned long ret_ip)
+ {
++/*
+ 	if (unlikely(size == 0))
+ 		return;
+ 
+@@ -183,6 +201,7 @@ static __always_inline void check_memory_region_inline(unsigned long addr,
+ 		return;
+ 
+ 	kasan_report(addr, size, write, ret_ip);
++*/
+ }
+ 
+ void check_memory_region(unsigned long addr, size_t size, bool write,
+diff --git a/mm/kasan/kasan.h b/mm/kasan/kasan.h
+index ea51b2d89..6cfcc987a 100644
+--- a/mm/kasan/kasan.h
++++ b/mm/kasan/kasan.h
+@@ -12,6 +12,13 @@
+ #define KASAN_TAG_INVALID	0xFE /* inaccessible memory tag */
+ #define KASAN_TAG_MAX		0xFD /* maximum value for random tags */
+ 
++#define DMA_KASAN_READ		0x8F
++#define DMA_KASAN_WRITE		0x4F
++#define DMA_KASAN_MAPP		(DMA_KASAN_READ|DMA_KASAN_WRITE)
++#define DMA_KASAN_ALLOC		0x3F /* We leave two bits for dma-map values */
++#define DMA_KASAN_MASK		(~(DMA_KASAN_ALLOC))
++#define DMA_KASAN_MAPP_MASK64	((1UL << 62) -1)
++
+ #ifdef CONFIG_KASAN_GENERIC
+ #define KASAN_FREE_PAGE         0xFF  /* page was freed */
+ #define KASAN_PAGE_REDZONE      0xFE  /* redzone for kmalloc_large allocations */
+@@ -151,7 +158,7 @@ static inline void quarantine_remove_cache(struct kmem_cache *cache) { }
+ void print_tags(u8 addr_tag, const void *addr);
+ 
+ u8 random_tag(void);
+-
++#error "Just making sure...\n"
+ #else
+ 
+ static inline void print_tags(u8 addr_tag, const void *addr) { }
+diff --git a/mm/slab.c b/mm/slab.c
+index 91c1863df..2cb6e185e 100644
+--- a/mm/slab.c
++++ b/mm/slab.c
+@@ -3328,7 +3328,7 @@ slab_alloc_node(struct kmem_cache *cachep, gfp_t flags, int nodeid,
+ 	if (unlikely(flags & __GFP_ZERO) && ptr)
+ 		memset(ptr, 0, cachep->object_size);
+ 
+-	slab_post_alloc_hook(cachep, flags, 1, &ptr);
++	slab_post_alloc_hook(cachep, flags, 1, &ptr, caller);
+ 	return ptr;
+ }
+ 
+@@ -3385,7 +3385,7 @@ slab_alloc(struct kmem_cache *cachep, gfp_t flags, unsigned long caller)
+ 	if (unlikely(flags & __GFP_ZERO) && objp)
+ 		memset(objp, 0, cachep->object_size);
+ 
+-	slab_post_alloc_hook(cachep, flags, 1, &objp);
++	slab_post_alloc_hook(cachep, flags, 1, &objp, caller);
+ 	return objp;
+ }
+ 
+@@ -3592,13 +3592,13 @@ int kmem_cache_alloc_bulk(struct kmem_cache *s, gfp_t flags, size_t size,
+ 		for (i = 0; i < size; i++)
+ 			memset(p[i], 0, s->object_size);
+ 
+-	slab_post_alloc_hook(s, flags, size, p);
++	slab_post_alloc_hook(s, flags, size, p, _RET_IP_);
+ 	/* FIXME: Trace call missing. Christoph would like a bulk variant */
+ 	return size;
+ error:
+ 	local_irq_enable();
+ 	cache_alloc_debugcheck_after_bulk(s, flags, i, p, _RET_IP_);
+-	slab_post_alloc_hook(s, flags, i, p);
++	slab_post_alloc_hook(s, flags, i, p, _RET_IP_);
+ 	__kmem_cache_free_bulk(s, i, p);
+ 	return 0;
+ }
+diff --git a/mm/slab.h b/mm/slab.h
+index 384105318..de65d4ba2 100644
+--- a/mm/slab.h
++++ b/mm/slab.h
+@@ -431,13 +431,13 @@ static inline struct kmem_cache *slab_pre_alloc_hook(struct kmem_cache *s,
+ }
+ 
+ static inline void slab_post_alloc_hook(struct kmem_cache *s, gfp_t flags,
+-					size_t size, void **p)
++					size_t size, void **p, unsigned long ip)
+ {
+ 	size_t i;
+ 
+ 	flags &= gfp_allowed_mask;
+ 	for (i = 0; i < size; i++) {
+-		p[i] = kasan_slab_alloc(s, p[i], flags);
++		p[i] = kasan_slab_alloc(s, p[i], flags, ip);
+ 		/* As p[i] might get tagged, call kmemleak hook after KASAN. */
+ 		kmemleak_alloc_recursive(p[i], s->object_size, 1,
+ 					 s->flags, flags);
+diff --git a/mm/slab_common.c b/mm/slab_common.c
+index f9d89c1b5..c389a253f 100644
+--- a/mm/slab_common.c
++++ b/mm/slab_common.c
+@@ -1508,7 +1508,7 @@ static __always_inline void *__do_krealloc(const void *p, size_t new_size,
+ 		ks = ksize(p);
+ 
+ 	if (ks >= new_size) {
+-		p = kasan_krealloc((void *)p, new_size, flags);
++		p = kasan_krealloc((void *)p, new_size, flags, _RET_IP_);
+ 		return (void *)p;
+ 	}
+ 
+diff --git a/mm/slub.c b/mm/slub.c
+index dc777761b..a3ce1c88d 100644
+--- a/mm/slub.c
++++ b/mm/slub.c
+@@ -2755,7 +2755,7 @@ static __always_inline void *slab_alloc_node(struct kmem_cache *s,
+ 	if (unlikely(gfpflags & __GFP_ZERO) && object)
+ 		memset(object, 0, s->object_size);
+ 
+-	slab_post_alloc_hook(s, gfpflags, 1, &object);
++	slab_post_alloc_hook(s, gfpflags, 1, &object, addr);
+ 
+ 	return object;
+ }
+@@ -2782,7 +2782,7 @@ void *kmem_cache_alloc_trace(struct kmem_cache *s, gfp_t gfpflags, size_t size)
+ {
+ 	void *ret = slab_alloc(s, gfpflags, _RET_IP_);
+ 	trace_kmalloc(_RET_IP_, ret, size, s->size, gfpflags);
+-	ret = kasan_kmalloc(s, ret, size, gfpflags);
++	ret = kasan_kmalloc(s, ret, size, gfpflags, _RET_IP_);
+ 	return ret;
+ }
+ EXPORT_SYMBOL(kmem_cache_alloc_trace);
+@@ -2810,7 +2810,7 @@ void *kmem_cache_alloc_node_trace(struct kmem_cache *s,
+ 	trace_kmalloc_node(_RET_IP_, ret,
+ 			   size, s->size, gfpflags, node);
+ 
+-	ret = kasan_kmalloc(s, ret, size, gfpflags);
++	ret = kasan_kmalloc(s, ret, size, gfpflags, _RET_IP_);
+ 	return ret;
+ }
+ EXPORT_SYMBOL(kmem_cache_alloc_node_trace);
+@@ -3182,11 +3182,11 @@ int kmem_cache_alloc_bulk(struct kmem_cache *s, gfp_t flags, size_t size,
+ 	}
+ 
+ 	/* memcg and kmem_cache debug support */
+-	slab_post_alloc_hook(s, flags, size, p);
++	slab_post_alloc_hook(s, flags, size, p, _RET_IP_);
+ 	return i;
+ error:
+ 	local_irq_enable();
+-	slab_post_alloc_hook(s, flags, i, p);
++	slab_post_alloc_hook(s, flags, i, p, _RET_IP_);
+ 	__kmem_cache_free_bulk(s, i, p);
+ 	return 0;
+ }
+@@ -3383,7 +3383,7 @@ static void early_kmem_cache_node_alloc(int node)
+ 	init_tracking(kmem_cache_node, n);
+ #endif
+ 	n = kasan_kmalloc(kmem_cache_node, n, sizeof(struct kmem_cache_node),
+-		      GFP_KERNEL);
++		      GFP_KERNEL, _RET_IP_);
+ 	page->freelist = get_freepointer(kmem_cache_node, n);
+ 	page->inuse = 1;
+ 	page->frozen = 0;
+@@ -3798,7 +3798,7 @@ void *__kmalloc(size_t size, gfp_t flags)
+ 
+ 	trace_kmalloc(_RET_IP_, ret, size, s->size, flags);
+ 
+-	ret = kasan_kmalloc(s, ret, size, flags);
++	ret = kasan_kmalloc(s, ret, size, flags, _RET_IP_);
+ 
+ 	return ret;
+ }
+@@ -3842,7 +3842,7 @@ void *__kmalloc_node(size_t size, gfp_t flags, int node)
+ 
+ 	trace_kmalloc_node(_RET_IP_, ret, size, s->size, flags, node);
+ 
+-	ret = kasan_kmalloc(s, ret, size, flags);
++	ret = kasan_kmalloc(s, ret, size, flags, _RET_IP_);
+ 
+ 	return ret;
+ }
 -- 
 2.20.1
 

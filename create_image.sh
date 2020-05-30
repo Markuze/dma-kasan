@@ -35,6 +35,7 @@ make olddefconfig
 ./scripts/config --disable CONFIG_XFS_ONLINE_SCRUB
 ./scripts/config --disable KASAN_EXTRA
 ./scripts/config --enable CONFIG_KASAN_OUTLINE
+./scripts/config --disable CONFIG_RANDOMIZE_BASE
 
 #make localmodconfig
 
