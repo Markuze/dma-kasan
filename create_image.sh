@@ -60,8 +60,8 @@ sudo DEBIAN_FRONTEND=noninteractive make modules_install install
 #exit
 
 echo 'configuring grub'
-#sudo sh -c 'echo GRUB_CMDLINE_LINUX=\"\$GRUB_CMDLINE_LINUX threadirqs\" >> /etc/default/grub.d/50-cloudimg-settings.cfg'
-#sudo sh -c 'echo GRUB_CMDLINE_LINUX=\"\$GRUB_CMDLINE_LINUX threadirqs\" >> /etc/default/grub'
+sudo sh -c 'echo GRUB_CMDLINE_LINUX=\"\$GRUB_CMDLINE_LINUX kasan_multi_shot\" >> /etc/default/grub.d/50-cloudimg-settings.cfg'
+sudo sh -c 'echo GRUB_CMDLINE_LINUX=\"\$GRUB_CMDLINE_LINUX kasan_multi_shot\" >> /etc/default/grub'
 
 #string='cbn'
 #STR=`sudo grep gnulinux /boot/grub/grub.cfg |grep -v recovery|grep $string|awk '{print $(NF-1)}'`
