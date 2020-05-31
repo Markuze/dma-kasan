@@ -1,17 +1,17 @@
-From c4f54ef74e385b821c42b510184288b9b46dd820 Mon Sep 17 00:00:00 2001
+From b249d704939bef11e9d6efe42009cead927ef3a0 Mon Sep 17 00:00:00 2001
 From: Markuze Alex <amarkuze@vmware.com>
 Date: Sun, 31 May 2020 08:10:47 +0000
 Subject: [PATCH 2/2] reporting on alloc after map
 
 ---
- mm/kasan/common.c | 10 ++++++----
- 1 file changed, 6 insertions(+), 4 deletions(-)
+ mm/kasan/common.c | 14 ++++++++++----
+ 1 file changed, 10 insertions(+), 4 deletions(-)
 
 diff --git a/mm/kasan/common.c b/mm/kasan/common.c
-index 5239c7cad..5b63f40b3 100644
+index 5239c7cad..f44196f40 100644
 --- a/mm/kasan/common.c
 +++ b/mm/kasan/common.c
-@@ -510,10 +510,12 @@ static void *__kasan_kmalloc(struct kmem_cache *cache, const void *object,
+@@ -510,10 +510,16 @@ static void *__kasan_kmalloc(struct kmem_cache *cache, const void *object,
  #else
  
  	//TODO: Check mapping flags and report.
@@ -23,7 +23,11 @@ index 5239c7cad..5b63f40b3 100644
 +	if (test_bit(PG_DMA_R, &page->flags) || write) {
 +		//kasan_report(addr, size, write, ret_ip);/// - check if page has dma write access
 +		/* Im afaraid of spamming dmesg... so just dumping to traces...*/
-+		trace_printk("Allocation on previously mapped page. at %pS\n", (void *)ret_ip);
++		trace_printk("Allocation on previously mapped page. $ size %zu [%s%s] %pS\n",
++				size,
++				test_bit(PG_DMA_R, &page->flags) ? "READ" : "",
++				write ? "WRITE" : "",
++				(void *)ret_ip);
 +	}
  	kasan_poison_shadow(object, size, DMA_KASAN_ALLOC);
  	if ((size >> KASAN_SHADOW_SCALE_SHIFT) >= sizeof(uint64_t)) {//64Byte allocs, can accomodate 32Bytes
