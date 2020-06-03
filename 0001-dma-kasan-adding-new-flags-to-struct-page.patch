@@ -1,30 +1,30 @@
-From 31088ddb522f8c52ada3a1a3fd63a8d8a1aae91e Mon Sep 17 00:00:00 2001
+From c2f8229d4f5b79ba6ee8d4b5d3f49f27f255db82 Mon Sep 17 00:00:00 2001
 From: Markuze Alex <amarkuze@vmware.com>
 Date: Wed, 27 May 2020 11:41:24 +0000
-Subject: [PATCH 1/2] dma-kasan: adding new flags to struct page
+Subject: [PATCH 1/3] dma-kasan: adding new flags to struct page
 
 dma-kasan: alloc/free poisoning
 ---
  Makefile                       |  2 +-
- include/linux/dma-mapping.h    | 16 ++++++++
- include/linux/kasan.h          | 12 +++---
- include/linux/page-flags.h     |  2 +
+ include/linux/dma-mapping.h    | 16 ++++++++++
+ include/linux/kasan.h          | 12 ++++---
+ include/linux/page-flags.h     |  2 ++
  include/linux/slab.h           |  1 +
- include/trace/events/mmflags.h |  4 +-
+ include/trace/events/mmflags.h |  4 ++-
  lib/Makefile                   |  1 +
- lib/test-dma-kasan.c           | 71 ++++++++++++++++++++++++++++++++++
- mm/kasan/common.c              | 71 +++++++++++++++++++++++-----------
- mm/kasan/generic.c             | 19 +++++++++
- mm/kasan/kasan.h               |  9 ++++-
- mm/slab.c                      |  8 ++--
- mm/slab.h                      |  4 +-
+ lib/test-dma-kasan.c           | 71 ++++++++++++++++++++++++++++++++++++++++++
+ mm/kasan/common.c              | 71 +++++++++++++++++++++++++++++-------------
+ mm/kasan/generic.c             | 19 +++++++++++
+ mm/kasan/kasan.h               |  9 +++++-
+ mm/slab.c                      |  8 ++---
+ mm/slab.h                      |  4 +--
  mm/slab_common.c               |  2 +-
- mm/slub.c                      | 16 ++++----
+ mm/slub.c                      | 16 +++++-----
  15 files changed, 193 insertions(+), 45 deletions(-)
  create mode 100644 lib/test-dma-kasan.c
 
 diff --git a/Makefile b/Makefile
-index d5713e7b1..52c2eda05 100644
+index d5713e7b1e50..52c2eda05897 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -2,7 +2,7 @@
@@ -37,7 +37,7 @@ index d5713e7b1..52c2eda05 100644
  
  # *DOCUMENTATION*
 diff --git a/include/linux/dma-mapping.h b/include/linux/dma-mapping.h
-index f6ded992c..1aa1467ae 100644
+index f6ded992c183..1aa1467ae6ff 100644
 --- a/include/linux/dma-mapping.h
 +++ b/include/linux/dma-mapping.h
 @@ -11,6 +11,7 @@
@@ -78,7 +78,7 @@ index f6ded992c..1aa1467ae 100644
  		addr = dma_direct_map_page(dev, page, offset, size, dir, attrs);
  	else
 diff --git a/include/linux/kasan.h b/include/linux/kasan.h
-index b40ea104d..4f9899fec 100644
+index b40ea104dd36..4f9899fec8a4 100644
 --- a/include/linux/kasan.h
 +++ b/include/linux/kasan.h
 @@ -57,12 +57,12 @@ void * __must_check kasan_kmalloc_large(const void *ptr, size_t size,
@@ -97,7 +97,7 @@ index b40ea104d..4f9899fec 100644
  bool kasan_slab_free(struct kmem_cache *s, void *object, unsigned long ip);
  
  struct kasan_cache {
-@@ -83,6 +83,8 @@ size_t kasan_metadata_size(struct kmem_cache *cache);
+@@ -83,6 +83,8 @@ struct kasan_cache {
  bool kasan_save_enable_multi_shot(void);
  void kasan_restore_multi_shot(bool enabled);
  
@@ -123,7 +123,7 @@ index b40ea104d..4f9899fec 100644
  	return object;
  }
 diff --git a/include/linux/page-flags.h b/include/linux/page-flags.h
-index 39b4494e2..8e3a058fc 100644
+index 39b4494e29f1..8e3a058fcb5c 100644
 --- a/include/linux/page-flags.h
 +++ b/include/linux/page-flags.h
 @@ -102,6 +102,8 @@ enum pageflags {
@@ -136,10 +136,10 @@ index 39b4494e2..8e3a058fc 100644
  
  	/* Filesystems */
 diff --git a/include/linux/slab.h b/include/linux/slab.h
-index 11b45f7ae..49867ba59 100644
+index 11b45f7ae405..49867ba590e5 100644
 --- a/include/linux/slab.h
 +++ b/include/linux/slab.h
-@@ -178,6 +178,7 @@ void memcg_destroy_kmem_caches(struct mem_cgroup *);
+@@ -178,6 +178,7 @@ struct kmem_cache *kmem_cache_create_usercopy(const char *name,
  /*
   * Common kmalloc functions provided by all allocators
   */
@@ -148,7 +148,7 @@ index 11b45f7ae..49867ba59 100644
  void * __must_check krealloc(const void *, size_t, gfp_t);
  void kfree(const void *);
 diff --git a/include/trace/events/mmflags.h b/include/trace/events/mmflags.h
-index a1675d437..5cd7ec068 100644
+index a1675d43777e..5cd7ec068eba 100644
 --- a/include/trace/events/mmflags.h
 +++ b/include/trace/events/mmflags.h
 @@ -100,7 +100,9 @@
@@ -163,7 +163,7 @@ index a1675d437..5cd7ec068 100644
  IF_HAVE_PG_UNCACHED(PG_uncached,	"uncached"	)		\
  IF_HAVE_PG_HWPOISON(PG_hwpoison,	"hwpoison"	)		\
 diff --git a/lib/Makefile b/lib/Makefile
-index e1b59da71..b12d0a882 100644
+index e1b59da71418..b12d0a8821fd 100644
 --- a/lib/Makefile
 +++ b/lib/Makefile
 @@ -51,6 +51,7 @@ obj-$(CONFIG_TEST_FIRMWARE) += test_firmware.o
@@ -176,7 +176,7 @@ index e1b59da71..b12d0a882 100644
  CFLAGS_test_kasan.o += $(call cc-disable-warning, vla)
 diff --git a/lib/test-dma-kasan.c b/lib/test-dma-kasan.c
 new file mode 100644
-index 000000000..e8c093a38
+index 000000000000..e8c093a38db6
 --- /dev/null
 +++ b/lib/test-dma-kasan.c
 @@ -0,0 +1,71 @@
@@ -252,7 +252,7 @@ index 000000000..e8c093a38
 +module_init(dma_tests_init);
 +MODULE_LICENSE("GPL");
 diff --git a/mm/kasan/common.c b/mm/kasan/common.c
-index 09b534fbb..5239c7cad 100644
+index 09b534fbba17..5239c7cad43e 100644
 --- a/mm/kasan/common.c
 +++ b/mm/kasan/common.c
 @@ -156,6 +156,7 @@ void kasan_poison_shadow(const void *address, size_t size, u8 value)
@@ -448,7 +448,7 @@ index 09b534fbb..5239c7cad 100644
  		__kasan_slab_free(page->slab_cache, ptr, ip, false);
  	}
 diff --git a/mm/kasan/generic.c b/mm/kasan/generic.c
-index ccb620727..a4f72b24c 100644
+index ccb6207276e3..a4f72b24cdbd 100644
 --- a/mm/kasan/generic.c
 +++ b/mm/kasan/generic.c
 @@ -166,10 +166,28 @@ static __always_inline bool memory_is_poisoned(unsigned long addr, size_t size)
@@ -489,7 +489,7 @@ index ccb620727..a4f72b24c 100644
  
  void check_memory_region(unsigned long addr, size_t size, bool write,
 diff --git a/mm/kasan/kasan.h b/mm/kasan/kasan.h
-index ea51b2d89..6cfcc987a 100644
+index ea51b2d898ec..6cfcc987a5f0 100644
 --- a/mm/kasan/kasan.h
 +++ b/mm/kasan/kasan.h
 @@ -12,6 +12,13 @@
@@ -516,10 +516,10 @@ index ea51b2d89..6cfcc987a 100644
  
  static inline void print_tags(u8 addr_tag, const void *addr) { }
 diff --git a/mm/slab.c b/mm/slab.c
-index 91c1863df..2cb6e185e 100644
+index 91c1863df93d..2cb6e185e41e 100644
 --- a/mm/slab.c
 +++ b/mm/slab.c
-@@ -3328,7 +3328,7 @@ slab_alloc_node(struct kmem_cache *cachep, gfp_t flags, int nodeid,
+@@ -3328,7 +3328,7 @@ static void *____cache_alloc_node(struct kmem_cache *cachep, gfp_t flags,
  	if (unlikely(flags & __GFP_ZERO) && ptr)
  		memset(ptr, 0, cachep->object_size);
  
@@ -528,7 +528,7 @@ index 91c1863df..2cb6e185e 100644
  	return ptr;
  }
  
-@@ -3385,7 +3385,7 @@ slab_alloc(struct kmem_cache *cachep, gfp_t flags, unsigned long caller)
+@@ -3385,7 +3385,7 @@ static void *____cache_alloc_node(struct kmem_cache *cachep, gfp_t flags,
  	if (unlikely(flags & __GFP_ZERO) && objp)
  		memset(objp, 0, cachep->object_size);
  
@@ -554,7 +554,7 @@ index 91c1863df..2cb6e185e 100644
  	return 0;
  }
 diff --git a/mm/slab.h b/mm/slab.h
-index 384105318..de65d4ba2 100644
+index 384105318779..de65d4ba2373 100644
 --- a/mm/slab.h
 +++ b/mm/slab.h
 @@ -431,13 +431,13 @@ static inline struct kmem_cache *slab_pre_alloc_hook(struct kmem_cache *s,
@@ -574,7 +574,7 @@ index 384105318..de65d4ba2 100644
  		kmemleak_alloc_recursive(p[i], s->object_size, 1,
  					 s->flags, flags);
 diff --git a/mm/slab_common.c b/mm/slab_common.c
-index f9d89c1b5..c389a253f 100644
+index f9d89c1b5977..c389a253f481 100644
 --- a/mm/slab_common.c
 +++ b/mm/slab_common.c
 @@ -1508,7 +1508,7 @@ static __always_inline void *__do_krealloc(const void *p, size_t new_size,
@@ -587,7 +587,7 @@ index f9d89c1b5..c389a253f 100644
  	}
  
 diff --git a/mm/slub.c b/mm/slub.c
-index dc777761b..a3ce1c88d 100644
+index dc777761b6b7..a3ce1c88d428 100644
 --- a/mm/slub.c
 +++ b/mm/slub.c
 @@ -2755,7 +2755,7 @@ static __always_inline void *slab_alloc_node(struct kmem_cache *s,
@@ -659,5 +659,5 @@ index dc777761b..a3ce1c88d 100644
  	return ret;
  }
 -- 
-2.20.1
+1.8.3.1
 

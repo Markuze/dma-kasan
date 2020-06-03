@@ -1,0 +1,126 @@
+From 1b7f99f6518a6ca2913783cbd953483b28bc61b2 Mon Sep 17 00:00:00 2001
+From: Boris Pismenny <borisp@mellanox.com>
+Date: Wed, 3 Jun 2020 23:44:47 +0300
+Subject: [PATCH 3/3] dma-kasan: add refcount and dma_unmap support
+
+Signed-off-by: Boris Pismenny <borisp@mellanox.com>
+---
+ include/linux/dma-mapping.h | 17 +++++++++++++++--
+ include/linux/mm_types.h    |  2 ++
+ include/linux/page_ref.h    |  6 ++++++
+ kernel/dma/direct.c         |  6 ++++++
+ lib/test-dma-kasan.c        |  3 +++
+ 5 files changed, 32 insertions(+), 2 deletions(-)
+
+diff --git a/include/linux/dma-mapping.h b/include/linux/dma-mapping.h
+index 1aa1467ae6ff..09abb3a052ea 100644
+--- a/include/linux/dma-mapping.h
++++ b/include/linux/dma-mapping.h
+@@ -284,6 +284,12 @@ static inline void mark_dma_mapped(struct page *page, enum dma_data_direction di
+ 		set_bit(PG_DMA_W, &page->flags);
+ }
+ 
++static inline void unmark_dma_mapped(struct page *page)
++{
++	clear_bit(PG_DMA_W, &page->flags);
++	clear_bit(PG_DMA_R, &page->flags);
++}
++
+ static inline dma_addr_t dma_map_page_attrs(struct device *dev,
+ 		struct page *page, size_t offset, size_t size,
+ 		enum dma_data_direction dir, unsigned long attrs)
+@@ -293,8 +299,14 @@ static inline dma_addr_t dma_map_page_attrs(struct device *dev,
+ 
+ 	BUG_ON(!valid_dma_direction(dir));
+ 
++	/* [BP]: ignore dmamap_count to handle read->write mappings and
++	 * viceverse.
++	 */
++	//if (!page_dmamap_count(page))
+ 	mark_dma_mapped(page, dir);
+ 
++	atomic_inc(&page->dmamap_refcount);
++
+ 	check_page_memory(page_address(page) + offset, size, _RET_IP_, test_bit(PG_DMA_W, &page->flags));
+ 
+ 	if (dma_is_direct(ops))
+@@ -312,10 +324,11 @@ static inline void dma_unmap_page_attrs(struct device *dev, dma_addr_t addr,
+ 	const struct dma_map_ops *ops = get_dma_ops(dev);
+ 
+ 	BUG_ON(!valid_dma_direction(dir));
+-	if (dma_is_direct(ops))
++	if (dma_is_direct(ops)) {
+ 		dma_direct_unmap_page(dev, addr, size, dir, attrs);
+-	else if (ops->unmap_page)
++	} else if (ops->unmap_page) {
+ 		ops->unmap_page(dev, addr, size, dir, attrs);
++	}
+ 	debug_dma_unmap_page(dev, addr, size, dir);
+ }
+ 
+diff --git a/include/linux/mm_types.h b/include/linux/mm_types.h
+index 2c471a2c43fa..fda4f840beda 100644
+--- a/include/linux/mm_types.h
++++ b/include/linux/mm_types.h
+@@ -204,6 +204,8 @@ struct page {
+ #ifdef LAST_CPUPID_NOT_IN_PAGE_FLAGS
+ 	int _last_cpupid;
+ #endif
++	/* Usage count. *DO NOT USE DIRECTLY*. See page_ref.h */
++	atomic_t dmamap_refcount;
+ } _struct_page_alignment;
+ 
+ /*
+diff --git a/include/linux/page_ref.h b/include/linux/page_ref.h
+index 14d14beb1f7f..1b2b9aa71fd3 100644
+--- a/include/linux/page_ref.h
++++ b/include/linux/page_ref.h
+@@ -72,8 +72,14 @@ static inline int page_count(struct page *page)
+ 	return atomic_read(&compound_head(page)->_refcount);
+ }
+ 
++static inline int page_dmamap_count(struct page *page)
++{
++	return atomic_read(&compound_head(page)->dmamap_refcount);
++}
++
+ static inline void set_page_count(struct page *page, int v)
+ {
++	atomic_set(&page->dmamap_refcount, 0);
+ 	atomic_set(&page->_refcount, v);
+ 	if (page_ref_tracepoint_active(__tracepoint_page_ref_set))
+ 		__page_ref_set(page, v);
+diff --git a/kernel/dma/direct.c b/kernel/dma/direct.c
+index 355d16acee6d..8907892530f1 100644
+--- a/kernel/dma/direct.c
++++ b/kernel/dma/direct.c
+@@ -286,6 +286,12 @@ void dma_direct_unmap_page(struct device *dev, dma_addr_t addr,
+ 		size_t size, enum dma_data_direction dir, unsigned long attrs)
+ {
+ 	phys_addr_t phys = dma_to_phys(dev, addr);
++	struct page *page = virt_to_page(phys_to_virt(phys));
++
++	atomic_dec(&page->dmamap_refcount);
++
++	if (!page_dmamap_count(page))
++		unmark_dma_mapped(page);
+ 
+ 	if (!(attrs & DMA_ATTR_SKIP_CPU_SYNC))
+ 		dma_direct_sync_single_for_cpu(dev, addr, size, dir);
+diff --git a/lib/test-dma-kasan.c b/lib/test-dma-kasan.c
+index e8c093a38db6..3e619ba5999a 100644
+--- a/lib/test-dma-kasan.c
++++ b/lib/test-dma-kasan.c
+@@ -50,6 +50,9 @@ static void noinline hello_dma_kasan(void)
+ 	kfree(buff);
+ 	pr_info("Dump on free\n");
+ 	print_hex_dump(KERN_INFO, "\t:", DUMP_PREFIX_OFFSET, 16, 1, shadow, SHADOW_PAGE_SIZE, false);
++
++	unmark_dma_mapped(page);
++	pr_info("DMA - (%d === 0)\n", test_bit(PG_DMA_W, &page->flags));
+ }
+ 
+ static int __init dma_tests_init(void)
+-- 
+1.8.3.1
+
