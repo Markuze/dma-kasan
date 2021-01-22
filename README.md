@@ -17,6 +17,9 @@ Then reboot and load the newly installed kernel.
 Experiments
 -----------
 
+To initiate tracing run tracek.sh which sets up kernel ftracing that
+we use for KASAN logging, it also dumps the current log to output\_trace.
+
 On the newly installed kernel, run an IO application that exercises the DMA
 APIs. We run pings with various messages sizes to trigger DMA map/unmap
 operations of various lengths in NIC drivers.  For example, ping 128 times with
@@ -37,8 +40,8 @@ run the script set the following environment variables:
 * $if -- some local network interface.
 * $repeat -- number of repeatitions for the test.
 
-After the IO stressing operation completes, check dmesg logs for any
-interesting stack traces produces by DMA-KASAN.
+After the IO stressing operation completes, check logs written to the local
+trace\_output\_end file for any interesting issues caught by DMA-KASAN.
 
 Recommendations and extensability
 ---------------------------------
