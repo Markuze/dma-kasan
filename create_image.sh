@@ -24,11 +24,6 @@ git config --global user.name  "Build VM"
 
 git am -3 $path/*.patch
 
-#LSMOD=$path/lsmod
-#dont exclude network related modules we might need
-#scripts/kconfig/streamline_config.pl > modconfig
-#[ ! "$?" -eq "0" ] && exit 4
-#mv modconfig .config
 ./scripts/config --enable CONFIG_KASAN
 make olddefconfig
 [ ! "$?" -eq "0" ] && exit 1
@@ -37,40 +32,19 @@ make olddefconfig
 ./scripts/config --enable CONFIG_KASAN_OUTLINE
 ./scripts/config --disable CONFIG_RANDOMIZE_BASE
 
-#make localmodconfig
-
-#echo "build image"
-#cp ./debian/scripts/retpoline-extract-one ./scripts/ubuntu-retpoline-extract-one
-
-#echo "initramfs dep"
-#sudo sed -i 's/most/dep/g' /etc/initramfs-tools/initramfs.conf
-
-#removing noise we dont need from 3rd party drivers
-#sed -i 's/obj-y/obj-n/g' ubuntu/Makefile
-
-#make -j `nproc` LOCALVERSION=-cbn > /dev/null
 make -j `nproc` #> /dev/null
 [ ! "$?" -eq "0" ] && exit 2
 
 echo "install image"
 sudo DEBIAN_FRONTEND=noninteractive make modules_install install
-#sudo DEBIAN_FRONTEND=noninteractive make INSTALL_MOD_STRIP=1 modules_install install
 [ ! "$?" -eq "0" ] && exit 3
 
-#exit
 
 echo 'configuring grub'
 sudo sh -c 'echo GRUB_CMDLINE_LINUX=\"\$GRUB_CMDLINE_LINUX kasan_multi_shot\" >> /etc/default/grub.d/50-cloudimg-settings.cfg'
 sudo sh -c 'echo GRUB_CMDLINE_LINUX=\"\$GRUB_CMDLINE_LINUX kasan_multi_shot\" >> /etc/default/grub'
 
-#string='cbn'
-#STR=`sudo grep gnulinux /boot/grub/grub.cfg |grep -v recovery|grep $string|awk '{print $(NF-1)}'`
-#echo $STR
-#sudo sed -i "s/GRUB_DEFAULT=.*/GRUB_DEFAULT=$STR/" /etc/default/grub
-#sudo sed -i "s/GRUB_DEFAULT=.*/GRUB_DEFAULT=$STR/" /etc/default/grub.d/50-cloudimg-settings.cfg
 sudo sh -c 'echo GRUB_DISABLE_RECOVERY="true" >> /etc/default/grub'
 sudo sh -c 'echo GRUB_DISABLE_SUBMENU=y >> /etc/default/grub'
 sudo update-grub2
 echo "done with image kernel creation"
-
-
