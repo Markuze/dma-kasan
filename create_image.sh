@@ -14,7 +14,7 @@ git clone git://kernel.ubuntu.com/ubuntu/ubuntu-bionic.git --depth=1 --branch=v5
 cd ubuntu-bionic
 
 echo "cp .config"
-udo cp /boot/config-`uname -r` .config
+sudo cp /boot/config-`uname -r` .config
 sudo chown `whoami` .config
 
 echo "apply patches"
@@ -26,6 +26,8 @@ git am -3 $path/*.patch
 
 ./scripts/config --enable CONFIG_KASAN
 make olddefconfig
+#make localmodconfig
+
 [ ! "$?" -eq "0" ] && exit 1
 ./scripts/config --disable CONFIG_XFS_ONLINE_SCRUB
 ./scripts/config --disable KASAN_EXTRA
@@ -34,6 +36,7 @@ make olddefconfig
 
 make -j `nproc` #> /dev/null
 [ ! "$?" -eq "0" ] && exit 2
+
 
 echo "install image"
 sudo DEBIAN_FRONTEND=noninteractive make modules_install install
