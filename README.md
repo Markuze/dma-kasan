@@ -43,6 +43,19 @@ run the script set the following environment variables:
 After the IO stressing operation completes, check logs written to the local
 trace\_output\_end file for any interesting issues caught by DMA-KASAN.
 
+Example output
+---------------
+$ ./tracek.sh
+or
+$ trace-cmd show
+
+```
+size 512 [READ, WRITE] __alloc_skb+0xe0/0x3f0
+size 512 [WRITE] load_elf_phdrs+0xbf/0x130
+size 512 [WRITE] __do_execve_file.isra.0+0x287/0x1080
+size 64  [WRITE] sock_alloc_inode+0x4f/0x120
+size 328 [READ, WRITE] assoc_array_insert+0xa9/0x7e0
+```
 Recommendations and extensability
 ---------------------------------
 
